@@ -248,6 +248,7 @@ class Application:
         
         callback_data = query.data
         user_id = update.effective_user.id
+        chat_id = query.message.chat_id if query.message else update.effective_chat.id
         
         algorithm_map = {
             "algo_msgnet": StyleTransferType.MSGNet,
@@ -263,6 +264,8 @@ class Application:
             StyleTransferType.MSGNetCustomTrain: "MSGNetCustomTrain"
         }
         
+        keyboard = self._create_algorithm_keyboard()
+        
         if callback_data == "algo_current":
             # Show current algorithm
             if context.user_data and 'style_transfer_type' in context.user_data:
@@ -270,19 +273,51 @@ class Application:
             else:
                 current_type = self._default_style_transfer_type
             
-            await query.edit_message_text(
-                text=f"Current algorithm: {algorithm_names[current_type]}",
-                reply_markup=self._create_algorithm_keyboard()
-            )
+            # Try to edit message if it has text, otherwise send new message
+            try:
+                if query.message and query.message.text:
+                    await query.edit_message_text(
+                        text=f"Current algorithm: {algorithm_names[current_type]}",
+                        reply_markup=keyboard
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Current algorithm: {algorithm_names[current_type]}",
+                        reply_markup=keyboard
+                    )
+            except Exception:
+                # If editing fails, send new message
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Current algorithm: {algorithm_names[current_type]}",
+                    reply_markup=keyboard
+                )
         elif callback_data in algorithm_map:
             # Set algorithm
             selected_type = algorithm_map[callback_data]
             context.user_data['style_transfer_type'] = selected_type
             
-            await query.edit_message_text(
-                text=f"Algorithm set to: {algorithm_names[selected_type]}",
-                reply_markup=self._create_algorithm_keyboard()
-            )
+            # Try to edit message if it has text, otherwise send new message
+            try:
+                if query.message and query.message.text:
+                    await query.edit_message_text(
+                        text=f"Algorithm set to: {algorithm_names[selected_type]}",
+                        reply_markup=keyboard
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Algorithm set to: {algorithm_names[selected_type]}",
+                        reply_markup=keyboard
+                    )
+            except Exception:
+                # If editing fails, send new message
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Algorithm set to: {algorithm_names[selected_type]}",
+                    reply_markup=keyboard
+                )
 
     async def _on_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
