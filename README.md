@@ -62,6 +62,7 @@ Start the application by the `python -m imgstyler_bot` command in the terminal (
 
 ### Style Transfer
 The bot now supports 4 algorithms that can be used for styling images:
+
 <img height="150" src="pic/pic2.jpg"/> 
 
 - #### Gatys
