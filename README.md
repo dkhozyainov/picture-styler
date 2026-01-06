@@ -1,10 +1,10 @@
 ## The final project for the course "Deep Learning"
-### Semester 1, autumn 2022 - https://stepik.org/course/124070/info
+### Semester 1, autumn 2025 - https://stepik.org/course/250969/syllabus
 #### Participant: DMITRII KHOZYAINOV
 
 # Telegram Bots - Styling images in a telegram bot
 
-<img height="200" src="pic/img_13.png"/> <img height="200" src="pic/img_12.png"/>
+<img height="200" src="pic/pic1.jpg"/> 
 
 ## Task:
 ```
