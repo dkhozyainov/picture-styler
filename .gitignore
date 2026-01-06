@@ -7,3 +7,5 @@ __pycache__/
 .run/
 .venv/
 /.timeweb_server/
+venv/
+venv\

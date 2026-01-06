@@ -1,10 +1,11 @@
 import logging
 from multiprocessing import Process
-from telegram import Update
-from telegram.ext import filters, MessageHandler, ApplicationBuilder, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import filters, MessageHandler, CommandHandler, CallbackQueryHandler, ApplicationBuilder, ContextTypes
 from io import BytesIO
 from PIL import Image
 from requests import post
+import json
 
 from styletransfer.styletransfer import StyleTransferType, StyleTransfer, StyleTransferInference, StyleTransferConfig
 
@@ -29,11 +30,32 @@ class InferenceWorker:
         result_image.save(bio, 'JPEG')
         bio.seek(0)
 
-        api_url = f'https://api.telegram.org/bot{self._token}/sendPhoto?chat_id={self._chat_id}'
+        # Create keyboard with algorithm selection buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("MSGNet", callback_data="algo_msgnet"),
+                InlineKeyboardButton("Magenta", callback_data="algo_magenta")
+            ],
+            [
+                InlineKeyboardButton("Gatys", callback_data="algo_gatys"),
+                InlineKeyboardButton("MSGNetCustom", callback_data="algo_msgnet_custom")
+            ],
+            [InlineKeyboardButton("Current", callback_data="algo_current")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Convert keyboard to JSON string for API call
+        keyboard_json = json.dumps(reply_markup.to_dict())
+
+        api_url = f'https://api.telegram.org/bot{self._token}/sendPhoto'
         files = {"photo": bio}
+        data = {
+            "chat_id": self._chat_id,
+            "reply_markup": keyboard_json
+        }
 
         try:
-            response = post(api_url, files=files)
+            response = post(api_url, files=files, data=data)
             print(f"Response: {response.text}")
         except Exception as e:
             print(f"Exception: {e}")
@@ -46,42 +68,77 @@ class InferenceWorker:
 
 class Application:
 
-    def __init__(self, style_transfer_type: StyleTransferType):
+    def __init__(self, default_style_transfer_type: StyleTransferType = StyleTransferType.MSGNet):
 
         # style transfer part:
-        self._style_transfer_type = style_transfer_type
+        self._default_style_transfer_type = default_style_transfer_type
         self._user_id_to_first_image = {}  # dict for saving the first photo from a user (we need 2 photos)
-        self._style_transfer = self._build_style_transfer()
+        # Cache for style transfer instances: (user_id, algorithm_type) -> StyleTransfer instance
+        self._style_transfer_cache = {}
 
         # telegram bot part:
         with open('../token.txt') as file:
             self._token = file.read()
         self._bot = self._build_and_run_bot()
 
-    def _build_style_transfer(self):
-        if self._style_transfer_type == StyleTransferType.Gatys:
+    def _build_style_transfer(self, style_transfer_type: StyleTransferType):
+        if style_transfer_type == StyleTransferType.Gatys:
             from styletransfer.gatys.gatys import Gatys
             return Gatys()
 
-        if self._style_transfer_type == StyleTransferType.Magenta:
+        if style_transfer_type == StyleTransferType.Magenta:
             from styletransfer.magenta.magenta import Magenta
             return Magenta()
 
-        if self._style_transfer_type == StyleTransferType.MSGNet \
-                or self._style_transfer_type == StyleTransferType.MSGNetCustomTrain:
+        if style_transfer_type == StyleTransferType.MSGNet \
+                or style_transfer_type == StyleTransferType.MSGNetCustomTrain:
 
             from styletransfer.msgnet.msgnet import MSGNet, MSGNetConfig
 
             model_path = './styletransfer/msgnet/'
-            model_path += '21styles.model' if self._style_transfer_type == StyleTransferType.MSGNet \
+            model_path += '21styles.model' if style_transfer_type == StyleTransferType.MSGNet \
                                             else 'my21styles.model'
 
             config = MSGNetConfig(model_path=model_path)
 
             return MSGNet(config)
 
+    def _get_style_transfer_for_user(self, user_id: int, style_transfer_type: StyleTransferType) -> StyleTransfer:
+        """Get or create a style transfer instance for a user and algorithm type."""
+        cache_key = (user_id, style_transfer_type)
+        if cache_key not in self._style_transfer_cache:
+            self._style_transfer_cache[cache_key] = self._build_style_transfer(style_transfer_type)
+        return self._style_transfer_cache[cache_key]
+
+    def _create_algorithm_keyboard(self):
+        """Create inline keyboard with algorithm selection buttons."""
+        keyboard = [
+            [
+                InlineKeyboardButton("MSGNet", callback_data="algo_msgnet"),
+                InlineKeyboardButton("Magenta", callback_data="algo_magenta")
+            ],
+            [
+                InlineKeyboardButton("Gatys", callback_data="algo_gatys"),
+                InlineKeyboardButton("MSGNetCustom", callback_data="algo_msgnet_custom")
+            ],
+            [InlineKeyboardButton("Current", callback_data="algo_current")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
     def _build_and_run_bot(self):
         bot = ApplicationBuilder().token(self._token).build()
+
+        # Callback query handler for inline button presses (should be first)
+        callback_handler = CallbackQueryHandler(self._on_callback_query)
+        bot.add_handler(callback_handler)
+
+        # Command handler for algorithm selection (should be before image handler)
+        algorithm_handler = CommandHandler('algorithm', self._on_algorithm_command)
+        bot.add_handler(algorithm_handler)
+
+        # Command handler for showing current algorithm
+        current_handler = CommandHandler('current', self._on_current_command)
+        bot.add_handler(current_handler)
 
         image_handler = MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._on_image)
         bot.add_handler(image_handler)
@@ -98,8 +155,134 @@ class Application:
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = ("Hi! I'm Image Styler. Send me 2 photos. I'll take the content from the first one and the style from "
                "the second one. Then I'll generate a new image with the taken content in the taken style and send it"
-               " back.")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=txt)
+               " back.\n\n"
+               "Choose an algorithm using the buttons below:")
+        keyboard = self._create_algorithm_keyboard()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=txt,
+            reply_markup=keyboard
+        )
+
+    async def _on_algorithm_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /algorithm command to select style transfer algorithm."""
+        if not context.args:
+            # Show available algorithms
+            txt = ("Available algorithms:\n\n"
+                   "1. MSGNet - Fastest, but sometimes with visible patterns\n"
+                   "2. Magenta - Fast enough\n"
+                   "3. Gatys - Nice but slow (may take a few minutes)\n"
+                   "4. MSGNetCustomTrain - Custom trained MSGNet\n\n"
+                   "Usage: /algorithm <number>\n"
+                   "Example: /algorithm 1")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=txt)
+            return
+
+        try:
+            choice = int(context.args[0])
+            algorithm_map = {
+                1: StyleTransferType.MSGNet,
+                2: StyleTransferType.Magenta,
+                3: StyleTransferType.Gatys,
+                4: StyleTransferType.MSGNetCustomTrain
+            }
+            
+            if choice not in algorithm_map:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"Invalid choice. Please select a number between 1 and {len(algorithm_map)}."
+                )
+                return
+
+            selected_type = algorithm_map[choice]
+            
+            # Store in user_data (user_data is always a dict in python-telegram-bot)
+            context.user_data['style_transfer_type'] = selected_type
+            
+            algorithm_names = {
+                StyleTransferType.MSGNet: "MSGNet",
+                StyleTransferType.Magenta: "Magenta",
+                StyleTransferType.Gatys: "Gatys",
+                StyleTransferType.MSGNetCustomTrain: "MSGNetCustomTrain"
+            }
+            
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Algorithm set to: {algorithm_names[selected_type]}"
+            )
+            
+        except ValueError:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Please provide a valid number."
+            )
+
+    async def _on_current_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /current command to show current algorithm."""
+        # Get algorithm from user_data or use default
+        if context.user_data and 'style_transfer_type' in context.user_data:
+            current_type = context.user_data['style_transfer_type']
+        else:
+            current_type = self._default_style_transfer_type
+        
+        algorithm_names = {
+            StyleTransferType.MSGNet: "MSGNet",
+            StyleTransferType.Magenta: "Magenta",
+            StyleTransferType.Gatys: "Gatys",
+            StyleTransferType.MSGNetCustomTrain: "MSGNetCustomTrain"
+        }
+        
+        keyboard = self._create_algorithm_keyboard()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Current algorithm: {algorithm_names[current_type]}",
+            reply_markup=keyboard
+        )
+
+    async def _on_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle callback queries from inline keyboard buttons."""
+        query = update.callback_query
+        
+        # Answer the callback query to remove loading state
+        await query.answer()
+        
+        callback_data = query.data
+        user_id = update.effective_user.id
+        
+        algorithm_map = {
+            "algo_msgnet": StyleTransferType.MSGNet,
+            "algo_magenta": StyleTransferType.Magenta,
+            "algo_gatys": StyleTransferType.Gatys,
+            "algo_msgnet_custom": StyleTransferType.MSGNetCustomTrain
+        }
+        
+        algorithm_names = {
+            StyleTransferType.MSGNet: "MSGNet",
+            StyleTransferType.Magenta: "Magenta",
+            StyleTransferType.Gatys: "Gatys",
+            StyleTransferType.MSGNetCustomTrain: "MSGNetCustomTrain"
+        }
+        
+        if callback_data == "algo_current":
+            # Show current algorithm
+            if context.user_data and 'style_transfer_type' in context.user_data:
+                current_type = context.user_data['style_transfer_type']
+            else:
+                current_type = self._default_style_transfer_type
+            
+            await query.edit_message_text(
+                text=f"Current algorithm: {algorithm_names[current_type]}",
+                reply_markup=self._create_algorithm_keyboard()
+            )
+        elif callback_data in algorithm_map:
+            # Set algorithm
+            selected_type = algorithm_map[callback_data]
+            context.user_data['style_transfer_type'] = selected_type
+            
+            await query.edit_message_text(
+                text=f"Algorithm set to: {algorithm_names[selected_type]}",
+                reply_markup=self._create_algorithm_keyboard()
+            )
 
     async def _on_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
@@ -112,6 +295,8 @@ class Application:
         img = Image.open(out)
 
         chat_id = msg.chat_id
+        user_id = update.effective_user.id
+        
         if chat_id not in self._user_id_to_first_image.keys():
             # TODO Doesn't look good if user sends both images at once:
             # txt = "...please send another one for style..."
@@ -120,7 +305,16 @@ class Application:
             self._user_id_to_first_image[chat_id] = img
             print(f"The first image from user {chat_id} has been saved, waiting for the second one")
         else:
-            if self._style_transfer_type == StyleTransferType.Gatys:  # the slow one
+            # Get user's selected algorithm or use default
+            if context.user_data and 'style_transfer_type' in context.user_data:
+                style_transfer_type = context.user_data['style_transfer_type']
+            else:
+                style_transfer_type = self._default_style_transfer_type
+            
+            # Get or create style transfer instance for this user and algorithm
+            style_transfer = self._get_style_transfer_for_user(user_id, style_transfer_type)
+            
+            if style_transfer_type == StyleTransferType.Gatys:  # the slow one
                 txt = "...in progress. Please wait, it may take a few minutes..."
             else:
                 txt = "...in progress. Please wait, it may take for a while..."
@@ -132,7 +326,7 @@ class Application:
             style_image = img
 
             inference_worker = InferenceWorker.get_worker(self._token, chat_id,
-                self._style_transfer, content_image, style_image)
+                style_transfer, content_image, style_image)
 
             p = Process(target=inference_worker)
             p.start()
@@ -145,8 +339,7 @@ if __name__ == '__main__':
         level=logging.INFO
     )
 
-    # Choose a stile transfer here:
-    # TODO make an external config and update the readme
-    style_transfer_type = StyleTransferType.Gatys
+    # Default style transfer algorithm (can be changed via /algorithm command in Telegram)
+    default_style_transfer_type = StyleTransferType.MSGNet
 
-    Application(style_transfer_type)
+    Application(default_style_transfer_type)
