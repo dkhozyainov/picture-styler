@@ -8,4 +8,4 @@ __pycache__/
 .venv/
 /.timeweb_server/
 venv/
-venv\
+/howto docker on vps.txt
